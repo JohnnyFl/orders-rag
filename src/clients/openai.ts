@@ -6,9 +6,17 @@ import { traceable } from 'langsmith/traceable';
 
 export const DEFAULT_CHAT_MODEL = "gpt-5.4-mini"
 export const DEFAULT_EMBED_MODEL = "text-embedding-3-small"
-export const EMBED_DIMENSION = "1536"
+export const EMBED_DIMENSION = 1536
 
 export const openai = wrapOpenAI(new OpenAI())
+
+type ParseWithZodFn = <T extends z.ZodTypeAny>(opts: {
+    schema: T;
+    name: string;
+    system: string;
+    user: string;
+    model?: string;
+}) => Promise<{ data: z.infer<T>; usage: OpenAI.Completions.CompletionUsage | null }>;
 
 export const parseWithZod = traceable(async function parseWithZod<T extends z.ZodTypeAny>(opts: {
     schema: T;
@@ -28,7 +36,7 @@ export const parseWithZod = traceable(async function parseWithZod<T extends z.Zo
     const parsed = resp.choices[0]?.message.parsed
     if (!parsed) throw new Error("openai parse: no parsed result")
     return {data: parsed as z.infer<T>, usage: resp.usage ?? null}
-})
+}) as ParseWithZodFn
 
 export async function embed(input: string | string[], model = DEFAULT_EMBED_MODEL):
 Promise<number[][]> {
