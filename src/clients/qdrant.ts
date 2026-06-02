@@ -9,7 +9,16 @@ export type Hit = {
     payload: Record<string, unknown>;
 };
 
+export type HybridUpsertItem = {
+    doc_id: string;
+    dense: number[];
+    bm25_text: string;   // raw text; Qdrant tokenizes server-side
+    payload: Record<string, unknown>;
+};
+
 export const COLLECTION_V1 = "documents-v1";
+export const COLLECTION_V2_HYBRID = "documents-v2-hybrid";
+
 
 export function qdrant(): QdrantClient {
     return new QdrantClient({
@@ -108,3 +117,60 @@ export async function search(query: string, k = 5, collection = COLLECTION_V1): 
         payload: p.payload as Record<string, unknown>,
     }));
 }
+
+export async function ensureHybridCollection(name = COLLECTION_V2_HYBRID, dim = EMBED_DIMENSION): Promise<void> {
+    const qc = qdrant();
+    const exists = await qc.collectionExists(name);
+    if (!exists.exists) {
+        await qc.createCollection(name, {
+            vectors: { dense: { size: dim, distance: "Cosine" } },
+            sparse_vectors: { bm25: { modifier: "idf" } },
+        });
+    }
+    const indexes: Array<[string, "keyword" | "datetime" | "float"]> = [
+        ["label","keyword"], ["doc_id","keyword"], ["customer_id","keyword"],
+        ["ship_country","keyword"], ["order_date","datetime"], ["total_price","float"],
+    ];
+    for (const [field, schema] of indexes) {
+        try { await qc.createPayloadIndex(name, { field_name: field, field_schema: schema }); }
+        catch (e) { if (!String(e).toLowerCase().includes("already exists")) throw e; }
+    }
+}
+
+export async function upsertHybridDocs(items: HybridUpsertItem[], collection = COLLECTION_V2_HYBRID): Promise<void> {
+    if (items.length === 0) return;
+    const BATCH = 200;
+    const qc = qdrant();
+    for (let i = 0; i < items.length; i += BATCH) {
+        const slice = items.slice(i, i + BATCH);
+        await qc.upsert(collection, {
+            wait: true,
+            points: slice.map(it => ({
+                id: docIdToUuid(it.doc_id),
+                vector: {
+                    dense: it.dense,
+                    bm25: { text: it.bm25_text, model: "qdrant/bm25" },
+                } as any,   // SDK type may not fully expose Document yet; runtime accepts it
+                payload: it.payload,
+            })),
+        });
+    }
+}
+
+export async function searchHybrid(query: string, k = 5, collection = COLLECTION_V2_HYBRID): Promise<Hit[]> {
+    const [vec] = await embed(query);
+    if (!vec) throw new Error("embed returned empty");
+    const r = await qdrant().query(collection, {
+        prefetch: [
+            { query: vec, using: "dense", limit: 20 },
+            { query: { text: query, model: "qdrant/bm25" } as any, using: "bm25", limit: 20 },
+        ],
+        query: { fusion: "rrf" } as any,
+        limit: k,
+        with_payload: true,
+    });
+    return r.points.map(p => ({
+        doc_id: String(p.payload?.doc_id ?? ""),
+        score: p.score,
+        payload: p.payload as Record<string, unknown>,
+    }))}

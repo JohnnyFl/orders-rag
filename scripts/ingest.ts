@@ -1,16 +1,21 @@
 import "dotenv/config";
 import { readCsv } from "../src/ingest/csv";
 import { extract } from "../src/ingest/pipeline";
-import { ensureCollection, upsertDocs, payloadFromDoc, COLLECTION_V1 } from "../src/clients/qdrant";
+import { COLLECTION_V1, COLLECTION_V2_HYBRID,
+    ensureCollection, ensureHybridCollection,
+    upsertDocs, upsertHybridDocs, payloadFromDoc, } from "../src/clients/qdrant";
 import { docEmbedText } from "../src/ingest/embed_text";
 import { embed } from "../src/clients/openai";
 import type { DocPayload } from "../src/schema";
 
-const INPUT = process.argv[2] ?? "data/docs.csv";
+const INPUT = process.argv.slice(2).find(a => !a.startsWith("--")) ?? "data/docs.csv";
 const CACHE = INPUT.replace(/\.csv$/, "") + ".cache.jsonl";
 const UPSERT_BATCH = 500;
 const EMBED_BATCH = 96;
 const BAR_WIDTH = 36;
+
+const hybrid = process.argv.includes("--hybrid");
+
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -133,7 +138,9 @@ if (await cacheFile.exists()) {
 
 section("Qdrant");
 const t1 = Date.now();
-await ensureCollection(COLLECTION_V1);
+const collection = hybrid ? COLLECTION_V2_HYBRID : COLLECTION_V1;
+if (hybrid) await ensureHybridCollection(collection);
+else        await ensureCollection(collection);
 console.log(`\n  Collection "${COLLECTION_V1}" ready  (${elapsed(Date.now() - t1)})`);
 
 // ── stage 3: embed ────────────────────────────────────────────────────────
@@ -163,26 +170,40 @@ console.log(`\n  Embedded ${vectors.length} docs  (${elapsed(Date.now() - t2)})`
 // ── stage 4: upsert ───────────────────────────────────────────────────────
 
 section("Upsert");
-const items = payloads.map((p, i) => ({
-    doc_id: p.doc_id,
-    vector: vectors[i]!,
-    payload: payloadFromDoc(p),
-}));
 
-const t3 = Date.now();
-let upserted = 0;
-for (let i = 0; i < items.length; i += UPSERT_BATCH) {
-    await upsertDocs(items.slice(i, i + UPSERT_BATCH));
-    upserted = Math.min(i + UPSERT_BATCH, items.length);
-    const elapsedSec = (Date.now() - t3) / 1000;
-    const rate = upserted / elapsedSec;
-    printProgress(
-        `${bar(upserted, items.length)} ${upserted}/${items.length}` +
-        `  ${rate.toFixed(0)} doc/s  ETA: ${eta(elapsedSec, upserted, items.length)}`
-    );
+if (hybrid) {
+    const items = payloads.map((p, i) => ({
+        doc_id: p.doc_id,
+        dense: vectors[i]!,
+        bm25_text: p.text,     // raw text for BM25
+        payload: payloadFromDoc(p),
+    }));
+    for (let i = 0; i < items.length; i += 500) {
+        await upsertHybridDocs(items.slice(i, i + 500), collection);
+        console.log(`  upserted ${Math.min(i+500, items.length)}/${items.length}`);
+    }
+} else {
+    const items = payloads.map((p, i) => ({
+        doc_id: p.doc_id,
+        vector: vectors[i]!,
+        payload: payloadFromDoc(p),
+    }));
+
+    const t3 = Date.now();
+    let upserted = 0;
+    for (let i = 0; i < items.length; i += UPSERT_BATCH) {
+        await upsertDocs(items.slice(i, i + UPSERT_BATCH));
+        upserted = Math.min(i + UPSERT_BATCH, items.length);
+        const elapsedSec = (Date.now() - t3) / 1000;
+        const rate = upserted / elapsedSec;
+        printProgress(
+            `${bar(upserted, items.length)} ${upserted}/${items.length}` +
+            `  ${rate.toFixed(0)} doc/s  ETA: ${eta(elapsedSec, upserted, items.length)}`
+        );
+    }
+    process.stdout.write("\n");
+    console.log(`\n  Upserted ${upserted} docs to "${COLLECTION_V1}"  (${elapsed(Date.now() - t3)})`);
 }
-process.stdout.write("\n");
-console.log(`\n  Upserted ${upserted} docs to "${COLLECTION_V1}"  (${elapsed(Date.now() - t3)})`);
 
 // ── summary ───────────────────────────────────────────────────────────────
 

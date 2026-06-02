@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { parseWithZod, DEFAULT_CHAT_MODEL } from "../clients/openai";
-import { search, type Hit } from "../clients/qdrant";
+import { search, searchHybrid, COLLECTION_V1, COLLECTION_V2_HYBRID, type Hit  } from "../clients/qdrant";
+import { rerank as doRerank } from "../clients/cohere";
+import { prompts } from "../prompt-registry";
+
+
+export type AnswerOpts = {
+    topK?: number;
+    collection?: string;
+    hybrid?: boolean;
+    useRerank?: boolean;
+};
 
 export const Citation = z.object({
     doc_id: z.string().describe("doc_id of a supporting document"),
@@ -15,20 +25,6 @@ export const RAGResponse = z.object({
 });
 export type RAGResponse = z.infer<typeof RAGResponse>;
 
-const SYSTEM = (context: string, question: string) => `You are a business analyst assistant answering questions about a company's operational records: invoices, shipping orders, purchase orders, and stock reports.
-
-Use only the documents provided.
-
-Rules:
-- If aggregation is needed (count / sum / group across many docs), set needs_aggregation=true with a brief note. Do NOT invent a numeric total.
-- If no document is relevant, set no_relevant_docs=true and answer with "I could not find a relevant document for that question."
-- Otherwise answer concisely. Cite every doc you used in citations[] with its doc_id.
-
-Documents:
-${context}
-
-Question: ${question}`;
-
 function formatContext(hits: Hit[]): string {
     return hits.map(h => {
         const text = String(h.payload.text ?? "").slice(0, 800);
@@ -38,15 +34,24 @@ function formatContext(hits: Hit[]): string {
 
 export type AnswerResult = { response: RAGResponse; hits: Hit[] };
 
-export async function answer(question: string, opts: { topK?: number; collection?: string } = {}): Promise<AnswerResult> {
-    const hits = await search(question, opts.topK ?? 5, opts.collection);
-    const sys = SYSTEM(formatContext(hits), question);
-    const { data } = await parseWithZod({
-        schema: RAGResponse,
-        name: "rag_response",
-        system: sys,
-        user: "Produce the structured answer now.",
-        model: DEFAULT_CHAT_MODEL,
+export async function answer(question: string, opts: AnswerOpts = {}): Promise<AnswerResult> {
+    const topK = opts.topK ?? 5;
+    const fetchK = opts.useRerank ? Math.min(topK * 4, 50) : topK;
+    const collection = opts.collection ?? (opts.hybrid ? COLLECTION_V2_HYBRID : COLLECTION_V1);
+
+    let hits = opts.hybrid
+        ? await searchHybrid(question, fetchK, collection)
+        : await search(question, fetchK, collection);
+
+    if (opts.useRerank && hits.length > topK) {
+        const docs = hits.map(h => String(h.payload.text ?? "").slice(0, 800));
+        const ranked = await doRerank(question, docs, topK);
+        hits = ranked.map(([idx, score]) => ({ ...hits[idx]!, score }));
+    }
+    const sys = prompts().render("qa_agent", {
+        context: formatContext(hits),
+        question,
     });
+    const { data } = await parseWithZod({ schema: RAGResponse, name: "rag_response", system: sys, user: "Produce the structured answer now." });
     return { response: data, hits };
 }
