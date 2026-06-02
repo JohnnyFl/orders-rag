@@ -10,12 +10,14 @@ export type AnswerOpts = {
     collection?: string;
     hybrid?: boolean;
     useRerank?: boolean;
+    label?: string | null;
 };
 
 export const Citation = z.object({
     doc_id: z.string().describe("doc_id of a supporting document"),
     note: z.string().nullish().describe("One sentence on what this doc contributed"),
 });
+export type CitationData = z.infer<typeof Citation>;
 
 export const RAGResponse = z.object({
     answer: z.string().describe("The answer or a refusal explanation"),
@@ -40,8 +42,8 @@ export async function answer(question: string, opts: AnswerOpts = {}): Promise<A
     const collection = opts.collection ?? (opts.hybrid ? COLLECTION_V2_HYBRID : COLLECTION_V1);
 
     let hits = opts.hybrid
-        ? await searchHybrid(question, fetchK, collection)
-        : await search(question, fetchK, collection);
+        ? await searchHybrid(question, fetchK, collection, opts.label ?? null)
+        : await search(question, fetchK, collection, opts.label ?? null);
 
     if (opts.useRerank && hits.length > topK) {
         const docs = hits.map(h => String(h.payload.text ?? "").slice(0, 800));

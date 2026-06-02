@@ -4,7 +4,9 @@
   "type": "module",
   "private": true,
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/js-yaml": "^4.0.9",
+    "@types/nunjucks": "^3.2.6"
   },
   "scripts": {
     "dev": "bun run --watch src/index.ts",

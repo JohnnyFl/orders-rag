@@ -2,6 +2,8 @@ import { QdrantClient } from "@qdrant/js-client-rest";
 import { createHash } from "node:crypto";
 import { embed, EMBED_DIMENSION } from "./openai";
 import type { DocPayload } from "../schema";
+import type { Schemas } from "@qdrant/js-client-rest";
+type Filter = Schemas["Filter"];
 
 export type Hit = {
     doc_id: string;
@@ -19,6 +21,10 @@ export type HybridUpsertItem = {
 export const COLLECTION_V1 = "documents-v1";
 export const COLLECTION_V2_HYBRID = "documents-v2-hybrid";
 
+function labelFilter(label?: string | null): Filter | undefined {
+    if (!label) return undefined;
+    return { must: [{ key: "label", match: { value: label } }] };
+}
 
 export function qdrant(): QdrantClient {
     return new QdrantClient({
@@ -103,13 +109,16 @@ export function payloadFromDoc(p: DocPayload): Record<string, unknown> {
     return out;
 }
 
-export async function search(query: string, k = 5, collection = COLLECTION_V1): Promise<Hit[]> {
+export async function search(query: string, k = 5, collection = COLLECTION_V1, label?: string | null): Promise<Hit[]> {
     const [vec] = await embed(query);
     if (!vec) throw new Error("embed returned empty");
+    const flt = labelFilter(label);
+
     const r = await qdrant().query(collection, {
         query: vec,
         limit: k,
         with_payload: true,
+        filter: flt,
     });
     return r.points.map(p => ({
         doc_id: String(p.payload?.doc_id ?? ""),
@@ -157,20 +166,25 @@ export async function upsertHybridDocs(items: HybridUpsertItem[], collection = C
     }
 }
 
-export async function searchHybrid(query: string, k = 5, collection = COLLECTION_V2_HYBRID): Promise<Hit[]> {
+export async function searchHybrid(
+    query: string, k = 5, collection = COLLECTION_V2_HYBRID, label?: string | null,
+): Promise<Hit[]> {
     const [vec] = await embed(query);
     if (!vec) throw new Error("embed returned empty");
+    const flt = labelFilter(label);
     const r = await qdrant().query(collection, {
         prefetch: [
-            { query: vec, using: "dense", limit: 20 },
-            { query: { text: query, model: "qdrant/bm25" } as any, using: "bm25", limit: 20 },
+            { query: vec, using: "dense", limit: 20, filter: flt },
+            { query: { text: query, model: "qdrant/bm25" } as any, using: "bm25", limit: 20, filter: flt },
         ],
         query: { fusion: "rrf" } as any,
         limit: k,
         with_payload: true,
-    });
+        filter: flt,
+    } as any);
     return r.points.map(p => ({
         doc_id: String(p.payload?.doc_id ?? ""),
         score: p.score,
         payload: p.payload as Record<string, unknown>,
-    }))}
+    }));
+}
