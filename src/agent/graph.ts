@@ -7,13 +7,14 @@ import { agentNode } from "./nodes/agent";
 import { refuseNode } from "./nodes/refuse";
 import { aggregateStubNode } from "./nodes/aggregate_stub";
 import { searchDocuments } from "./tools/search";
+import {getDocumentById} from "./tools/get_by_id.ts";
+import {aggregateDocuments} from "./tools/aggregate.ts";
 
-const toolNode = new ToolNode([searchDocuments]);   // FinalResponse omitted — never actually executed
+const toolNode = new ToolNode([searchDocuments, getDocumentById, aggregateDocuments]);
 
-function routeAfterRouter(state: State): "refuse" | "aggregate_stub" | "expand" {
+function routeAfterRouter(state: State): "refuse" | "expand" {
     if (!state.relevant) return "refuse";
-    if (state.needs_aggregation) return "aggregate_stub";
-    return "expand";
+    return "expand";  // aggregation flag now flows into the agent prompt
 }
 
 function routeAfterAgent(state: State): "tool_node" | typeof END {

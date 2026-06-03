@@ -3,11 +3,15 @@ import { SystemMessage, HumanMessage, AIMessage } from "@langchain/core/messages
 import type { State } from "../state";
 import { prompts } from "../../prompt-registry";
 import { searchDocuments } from "../tools/search";
-import { FinalResponseSchema } from "../models";
+import { FinalResponseTool } from "../models";
+import { getDocumentById } from "../tools/get_by_id";
+import { aggregateDocuments } from "../tools/aggregate";
 
 const llm = new ChatOpenAI({ model: "gpt-4.1-mini" });
-const llmWithTools = llm.bindTools([searchDocuments, FinalResponseSchema], { tool_choice: "auto" });
-
+const llmWithTools = llm.bindTools(
+    [searchDocuments, getDocumentById, aggregateDocuments, FinalResponseTool],
+    { tool_choice: "auto" }
+);
 export async function agentNode(state: State): Promise<Partial<State>> {
     const system = prompts().render("qa_agent_react", {
         needs_aggregation: state.needs_aggregation,
